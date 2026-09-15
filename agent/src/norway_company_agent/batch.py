@@ -6,19 +6,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .evidence import evidence, utc_now
+from .claims import materialise_claims
+from .synthesis import grounded_summary
 from .official import accounting_obligation_assessment
 from .sampling import iter_bulk
 
 
 TERMINAL_STATES = {
-    "complete",
+    "available",
+    "not_available",
     "not_applicable",
-    "not_found",
-    "blocked_policy",
-    "blocked_robots",
-    "source_error",
-    "budget_exhausted",
-    "submission_error",
+    "blocked",
+    "ambiguous",
+    "failed",
 }
 
 
@@ -97,20 +97,24 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
 
 def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     if not record:
-        return "submission_error"
+        return "failed"
     status = record.get("status")
     if status == "available":
-        return "complete"
+        if record.get("field") == "website":
+            assessment = ((record.get("value") or {}).get("identity_assessment") or {})
+            return "available" if assessment.get("publishable") else "ambiguous"
+        return "available"
     if status == "not_applicable":
         return "not_applicable"
     if status == "not_found":
-        return "not_found"
+        return "not_available"
     if status == "blocked":
-        note = str(record.get("note") or "").casefold()
-        return "blocked_robots" if "robot" in note else "blocked_policy"
+        return "blocked"
+    if status == "ambiguous":
+        return "ambiguous"
     if status == "source_error":
-        return "source_error"
-    return "submission_error"
+        return "failed"
+    return "failed"
 
 
 def terminal_envelope(
@@ -129,16 +133,20 @@ def terminal_envelope(
             "retry_count": int((record or {}).get("retry_count") or 0),
             "final_timestamp": (record or {}).get("retrieved_at") or completed_at,
         }
-    entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
-    return {
+    entity_state = "failed" if module_states.get("registry", {}).get("state") == "failed" else "available"
+    claims = materialise_claims(profile)
+    result = {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
         "state": entity_state,
         "started_at": started_at,
         "completed_at": completed_at,
         "modules": module_states,
+        "claims": claims,
         "profile": profile,
     }
+    result["summary"] = grounded_summary(result)
+    return result
 
 
 def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> dict[str, Any]:

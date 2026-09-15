@@ -71,12 +71,17 @@ def _get(value: Any, *path: str) -> Any:
     return value
 
 
-def normalize_financials(body: Any) -> dict[str, Any]:
+def normalize_financials(body: Any, expected_org: str | None = None) -> dict[str, Any]:
     records = body if isinstance(body, list) else []
     if not records:
         return {"records": []}
     normalized = []
+    identity_errors = []
     for item in records[:3]:
+        embedded_org = str(_get(item, "virksomhet", "organisasjonsnummer") or "")
+        if expected_org and embedded_org != expected_org:
+            identity_errors.append({"record_id": item.get("id"), "embedded_organisation_number": embedded_org or None})
+            continue
         normalized.append({
             "record_id": item.get("id"),
             "account_type": item.get("regnskapstype"),
@@ -90,7 +95,7 @@ def normalize_financials(body: Any) -> dict[str, Any]:
             "equity": _get(item, "egenkapitalGjeld", "egenkapital", "sumEgenkapital"),
             "debt": _get(item, "egenkapitalGjeld", "gjeldOversikt", "sumGjeld"),
         })
-    return {"records": normalized}
+    return {"records": normalized, **({"identity_errors": identity_errors} if identity_errors else {})}
 
 
 def normalize_financial_history(body: Any, org: str) -> dict[str, Any]:
@@ -172,10 +177,17 @@ def normalize_entity(body: Any) -> dict[str, Any]:
 
 def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
     if result.status == 200:
-        return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        record = evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        record["retry_count"] = max(0, result.attempted_requests - result.redirect_count - 1)
+        record["redirect_count"] = result.redirect_count
+        return record
     if result.status in {404, 410}:
-        return evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
-    return evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        record = evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    else:
+        record = evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    record["retry_count"] = max(0, result.attempted_requests - result.redirect_count - 1)
+    record["redirect_count"] = result.redirect_count
+    return record
 
 
 def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str], FetchResult] = fetch_json) -> tuple[dict[str, Any], list[FetchResult]]:
@@ -196,6 +208,15 @@ def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str],
         metrics.append(result)
         normalized = None
         if result.status == 200:
-            normalized = normalize_entity(result.body) if module == "registry_live" else normalize_financials(result.body) if module == "financials" else normalize_financial_history(result.body, org) if module == "financial_history" else normalize_roles(result.body) if module == "roles" else normalize_locations(result.body) if module == "locations" else result.body
-        records[module] = _classified(module, source_type, result, value=normalized)
+            normalized = normalize_entity(result.body) if module == "registry_live" else normalize_financials(result.body, org) if module == "financials" else normalize_financial_history(result.body, org) if module == "financial_history" else normalize_roles(result.body) if module == "roles" else normalize_locations(result.body) if module == "locations" else result.body
+        record = _classified(module, source_type, result, value=normalized)
+        if result.status == 200 and module == "registry_live" and str(normalized.get("organisation_number") or "") != org:
+            record["status"] = "ambiguous"
+            record["value"] = None
+            record["note"] = "Live registry response did not embed the requested exact organisation number"
+        if result.status == 200 and module == "financials" and normalized.get("identity_errors"):
+            record["status"] = "ambiguous"
+            record["value"] = None
+            record["note"] = "Filed accounts contain records without the requested embedded organisation number"
+        records[module] = record
     return records, metrics

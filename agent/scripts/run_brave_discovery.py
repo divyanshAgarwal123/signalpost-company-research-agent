@@ -24,6 +24,15 @@ from norway_company_agent.website import fetch_website  # noqa: E402
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
 
+class NoApiRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never carry the server-side subscription token to a redirect target.
+        return None
+
+
+BRAVE_OPENER = urllib.request.build_opener(NoApiRedirectHandler())
+
+
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -56,7 +65,7 @@ def brave_search(profile: dict, api_key: str, *, timeout: float, count: int) -> 
     })
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with BRAVE_OPENER.open(request, timeout=timeout) as response:
             raw = response.read()
         elapsed_ms = int((time.monotonic() - started) * 1000)
         payload = json.loads(raw)

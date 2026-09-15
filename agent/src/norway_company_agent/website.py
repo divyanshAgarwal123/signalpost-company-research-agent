@@ -5,6 +5,7 @@ import ipaddress
 import re
 import socket
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,10 +32,32 @@ SOCIAL_HOSTS = {
     "tiktok.com": "tiktok",
 }
 PRIORITY_TERMS = (
+    "salgsvilk", "vilkar", "terms", "legal", "impressum", "org.nr",
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
+    "careers", "karriere", "stillings", "ledige-jobb", "jobb", "jobs",
     "news", "press", "aktuelt", "nyheter",
 )
+NEWS_ARCHIVE_PATH = re.compile(r"/(?:news|press|aktuelt|nyheter|blog)(?:/)?$", re.I)
+
+
+def _published_at(soup: BeautifulSoup) -> str | None:
+    meta = soup.select_one('meta[property="article:published_time"], meta[name="datePublished"]')
+    if meta and meta.get("content"):
+        return str(meta["content"]).strip()[:60]
+    tag = soup.select_one("time[datetime]")
+    return str(tag["datetime"]).strip()[:60] if tag and tag.get("datetime") else None
+
+
+def _first_news_article_link(archive_url: str, soup: BeautifulSoup) -> str | None:
+    prefix = urllib.parse.urlparse(archive_url).path.rstrip("/") + "/"
+    archive_host = urllib.parse.urlparse(archive_url).hostname
+    for anchor in soup.select("a[href]"):
+        candidate = urllib.parse.urljoin(archive_url, str(anchor.get("href") or ""))
+        parsed = urllib.parse.urlparse(candidate)
+        if parsed.scheme in {"http", "https"} and parsed.hostname == archive_host and parsed.path.startswith(prefix):
+            return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return None
 
 
 def assert_public_url(url: str) -> None:
@@ -56,11 +79,17 @@ def assert_public_url(url: str) -> None:
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        _network_counts.redirects = getattr(_network_counts, "redirects", 0) + 1
         assert_public_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 SAFE_OPENER = urllib.request.build_opener(SafeRedirectHandler())
+_network_counts = threading.local()
+
+
+def _redirects() -> int:
+    return getattr(_network_counts, "redirects", 0)
 
 
 def normalize_homepage(value: str | None) -> str | None:
@@ -81,7 +110,7 @@ def _registered_domain(url: str) -> str:
     return ext.top_domain_under_public_suffix
 
 
-def _robots_allowed(url: str, timeout: float) -> bool:
+def _robots_allowed(url: str, timeout: float, *, homepage: bool = False) -> bool:
     assert_public_url(url)
     parsed = urllib.parse.urlparse(url)
     robots_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/robots.txt", "", "", ""))
@@ -93,10 +122,9 @@ def _robots_allowed(url: str, timeout: float) -> bool:
             parser.parse(response.read().decode("utf-8", errors="replace").splitlines())
         return parser.can_fetch(USER_AGENT, url)
     except Exception:
-        # An unavailable robots file is not permission to ignore explicit site terms; callers retain
-        # the URL and can route uncertain domains to review. For this bounded homepage POC, allow one
-        # ordinary GET when robots.txt is absent rather than crawl deeper.
-        return True
+        # One ordinary registry-linked homepage GET can be attempted when the
+        # robots file is absent; do not follow child links without robots proof.
+        return homepage
 
 
 def _social_links(base_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
@@ -186,7 +214,7 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     return {"platform": platform, "url": f"https://{canonical_host}/{'/'.join(parts)}"}
 
 
-def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[str]:
+def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 6) -> list[str]:
     base = urllib.parse.urlparse(base_url)
     candidates: dict[str, int] = {}
     for anchor in soup.select("a[href]"):
@@ -207,8 +235,9 @@ def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[
 
 
 def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max_bytes: int) -> tuple[dict[str, Any] | None, list[dict[str, str]], int, int, int, str | None]:
+    _network_counts.redirects = 0
     if not _robots_allowed(url, timeout):
-        return None, [], 1, 0, 0, "robots.txt disallows page"
+        return None, [], 1 + _redirects(), 0, 0, "robots.txt disallows or could not authorize child page"
     started = time.monotonic()
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     try:
@@ -217,9 +246,9 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
             elapsed = int((time.monotonic() - started) * 1000)
             final_url = response.geturl()
             if len(raw) > max_bytes or "html" not in response.headers.get("content-type", "").lower():
-                return None, [], 2, len(raw), elapsed, "unsupported or oversized page"
+                return None, [], 2 + _redirects(), len(raw), elapsed, "unsupported or oversized page"
             if _registered_domain(final_url) != homepage_domain:
-                return None, [], 2, len(raw), elapsed, "redirected outside registered domain"
+                return None, [], 2 + _redirects(), len(raw), elapsed, "redirected outside registered domain"
         page_html = raw.decode("utf-8", errors="replace")
         page_soup = BeautifulSoup(page_html, "lxml")
         page_text = trafilatura.extract(page_html, url=final_url, include_links=False, include_tables=False, favor_precision=True) or ""
@@ -228,10 +257,12 @@ def _fetch_secondary_page(url: str, *, homepage_domain: str, timeout: float, max
             "title": page_soup.title.get_text(" ", strip=True)[:500] if page_soup.title else "",
             "main_text_excerpt": page_text[:5000],
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
+            "published_at": _published_at(page_soup),
+            "priority_links": [link] if NEWS_ARCHIVE_PATH.search(urllib.parse.urlparse(final_url).path) and (link := _first_news_article_link(final_url, page_soup)) else [],
         }
-        return page, _social_links(final_url, page_soup), 2, len(raw), elapsed, None
+        return page, _social_links(final_url, page_soup), 2 + _redirects(), len(raw), elapsed, None
     except Exception as exc:
-        return None, [], 2, 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
+        return None, [], 2 + _redirects(), 0, int((time.monotonic() - started) * 1000), f"{type(exc).__name__}: {str(exc)[:120]}"
 
 
 def _jsonld_organisations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -258,6 +289,7 @@ def _extraction_state(text: str, soup: BeautifulSoup) -> str:
 
 
 def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_000_000) -> tuple[dict[str, Any], dict[str, Any]]:
+    _network_counts.redirects = 0
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
     normalized = normalize_homepage(url)
@@ -266,9 +298,16 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
     try:
         assert_public_url(normalized)
     except ValueError as exc:
+        parsed = urllib.parse.urlparse(normalized)
+        if "did not resolve" in str(exc).casefold() and (parsed.hostname or "").startswith("www."):
+            apex = parsed.hostname[4:]
+            fallback = urllib.parse.urlunparse((parsed.scheme, apex + (f":{parsed.port}" if parsed.port else ""), parsed.path, "", "", ""))
+            # This is the same registered domain, used only as another crawl
+            # candidate. Publication still depends on fetched-page identity.
+            return fetch_website(fallback, timeout=timeout, max_bytes=max_bytes)
         return evidence("website", "blocked", "registry_linked_company_website", normalized, note=str(exc)), {"requests": 0, "bytes": 0, "latencies_ms": []}
-    if not _robots_allowed(normalized, timeout):
-        return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1, "bytes": 0, "latencies_ms": []}
+    if not _robots_allowed(normalized, timeout, homepage=True):
+        return evidence("website", "blocked", "registry_linked_company_website", normalized, note="robots.txt disallows this user agent"), {"requests": 1 + _redirects(), "bytes": 0, "latencies_ms": []}
     started = time.monotonic()
     request = urllib.request.Request(normalized, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
     try:
@@ -276,15 +315,22 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             content_type = response.headers.get("content-type", "")
             raw = response.read(max_bytes + 1)
             elapsed = int((time.monotonic() - started) * 1000)
+            home_requests = 2 + _redirects()
             if len(raw) > max_bytes:
-                return evidence("website", "blocked", "registry_linked_company_website", normalized, note="Homepage exceeds byte limit"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
+                return evidence("website", "blocked", "registry_linked_company_website", normalized, note="Homepage exceeds byte limit"), {"requests": home_requests, "bytes": len(raw), "latencies_ms": [elapsed]}
             if "html" not in content_type.lower():
-                return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"Unsupported content type: {content_type}"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
+                return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"Unsupported content type: {content_type}"), {"requests": home_requests, "bytes": len(raw), "latencies_ms": [elapsed]}
             final_url = response.geturl()
             assert_public_url(final_url)
         html = raw.decode("utf-8", errors="replace")
         soup = BeautifulSoup(html, "lxml")
-        structured = extruct.extract(html, base_url=final_url, syntaxes=["json-ld", "microdata", "opengraph"])
+        try:
+            structured = extruct.extract(html, base_url=final_url, syntaxes=["json-ld", "microdata", "opengraph"])
+        except ValueError:
+            # Some registry-linked hosts serve XML with an HTML content type.
+            # Structured-data extraction may reject its encoding declaration;
+            # keep the fetched page and let the identity gate decide.
+            structured = {}
         text = trafilatura.extract(html, url=final_url, include_links=False, include_tables=False, favor_precision=True) or ""
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
         description_tag = soup.select_one('meta[name="description"], meta[property="og:description"]')
@@ -304,7 +350,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         pages = [{"url": final_url, "title": title[:500], "main_text_excerpt": text[:5000], "content_sha256": value["content_sha256"]}]
         social = value["social_links"]
         crawl_errors = []
-        requests = 2
+        requests = home_requests
         bytes_received = len(raw)
         page_latencies = [elapsed]
         homepage_domain = value["registered_domain"]
@@ -322,6 +368,22 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             if page:
                 pages.append(page)
                 social.extend(page_social)
+                if page.get("priority_links"):
+                    article_url = page["priority_links"][0]
+                    if urllib.parse.urlparse(article_url).path.startswith(urllib.parse.urlparse(page["url"]).path.rstrip("/") + "/"):
+                        article, article_social, article_requests, article_bytes, article_elapsed, article_error = _fetch_secondary_page(
+                            article_url, homepage_domain=homepage_domain, timeout=timeout,
+                            max_bytes=min(max_bytes, 1_000_000),
+                        )
+                        requests += article_requests
+                        bytes_received += article_bytes
+                        if article_elapsed:
+                            page_latencies.append(article_elapsed)
+                        if article:
+                            pages.append(article)
+                            social.extend(article_social)
+                        elif article_error:
+                            crawl_errors.append({"url": article_url, "error": article_error})
             elif page_error:
                 crawl_errors.append({"url": page_url, "error": page_error})
         value["pages"] = pages
@@ -331,16 +393,17 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
     except urllib.error.HTTPError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
         status = "not_found" if exc.code in {404, 410} else "source_error"
-        return evidence("website", status, "registry_linked_company_website", normalized, note=f"HTTP {exc.code}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"HTTP {exc.code}"), {"requests": 2 + _redirects(), "bytes": 0, "latencies_ms": [elapsed]}
     except urllib.error.URLError as exc:
         if not supplied_scheme and normalized.startswith("https://"):
             first_elapsed = int((time.monotonic() - started) * 1000)
+            first_requests = 2 + _redirects()
             record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes)
-            metrics["requests"] += 2
+            metrics["requests"] += first_requests
             metrics["latencies_ms"].insert(0, first_elapsed)
             return record, metrics
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), {"requests": 2 + _redirects(), "bytes": 0, "latencies_ms": [elapsed]}
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), {"requests": 2 + _redirects(), "bytes": 0, "latencies_ms": [elapsed]}

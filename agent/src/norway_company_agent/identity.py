@@ -38,26 +38,81 @@ def _normalised_phrase(value: Any) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text))
 
 
-def _legal_name_and_registry_place_on_same_page(profile: dict[str, Any], value: dict[str, Any], source_url: str) -> bool:
+def _homepage_org_number_proof(value: dict[str, Any], org_digits: str, source_url: str) -> dict[str, Any] | None:
+    if len(org_digits) != 9:
+        return None
+    number_pattern = re.compile(r"(?<!\d)" + r"[\s.\-]*".join(re.escape(digit) for digit in org_digits) + r"(?!\d)")
+    for path, raw in (
+        ("homepage.title", value.get("title")),
+        ("homepage.meta.description", value.get("description")),
+        ("homepage.identity_text_excerpt", value.get("identity_text_excerpt")),
+        ("homepage.main_text_excerpt", value.get("main_text_excerpt")),
+    ):
+        text = str(raw or "")
+        matched = number_pattern.search(text)
+        if not matched:
+            continue
+        context = text[max(0, matched.start() - 32):matched.start()]
+        is_identity_label = bool(re.search(r"(?:org\.?\s*(?:nr|nummer)|organisasjons\s*(?:nr|nummer))\.?\s*[:#-]?\s*$", context, re.I))
+        if is_identity_label:
+            return {
+                "source_url": value.get("final_url") or source_url,
+                "content_sha256": value.get("content_sha256"),
+                "source_path": path,
+                # Keep only the label and organisation number. Nearby contact
+                # details are unrelated to the company identity proof.
+                "supporting_span": text[max(0, matched.start() - 24):matched.end() + 12],
+                "matched_organisation_number": org_digits,
+            }
+    return None
+
+
+def _homepage_operator_conflict(profile: dict[str, Any], value: dict[str, Any]) -> str | None:
+    """A related entity in a staff/client list cannot override the site's named operator."""
+    title_tokens = set(_tokens(value.get("title")))
+    core = set(_tokens(profile.get("name")))
+    description = str(value.get("description") or "").strip()
+    first_sentence = description.split(".", 1)[0][:140]
+    named_operator = re.match(r"\s*([\wÆØÅæøå\s-]{2,100}?)\s+(AS|ASA|ANS|DA|SA|STI|STIFTELSEN)\b", first_sentence, re.I)
+    if not named_operator or not title_tokens or not core:
+        return None
+    other_name = " ".join(named_operator.groups())
+    other_core = set(_tokens(other_name))
+    if other_core and other_core != core and other_core.issubset(title_tokens) and not core.issubset(title_tokens):
+        return other_name.strip()
+    return None
+
+
+def _legal_name_and_registry_place_on_same_page(profile: dict[str, Any], value: dict[str, Any], source_url: str) -> dict[str, Any] | None:
     registry = (profile.get("evidence", {}).get("registry") or {}).get("value") or {}
     legal_name = _normalised_phrase(profile.get("name"))
     postcode = _normalised_phrase(registry.get("forretningsadresse.postnummer"))
     place = _normalised_phrase(registry.get("forretningsadresse.poststed"))
     if not legal_name or not postcode or not place:
-        return False
+        return None
     source_host = (urllib.parse.urlparse(value.get("final_url") or source_url).hostname or "").removeprefix("www.")
-    pages = [{"url": value.get("final_url") or source_url, "main_text_excerpt": value.get("main_text_excerpt")}]
+    pages = [{"url": value.get("final_url") or source_url, "main_text_excerpt": value.get("main_text_excerpt"), "identity_text_excerpt": value.get("identity_text_excerpt")}]
     pages.extend(value.get("pages") or [])
     for page in pages:
         page_host = (urllib.parse.urlparse(page.get("url") or "").hostname or "").removeprefix("www.")
         if page_host != source_host:
             continue
-        text = " " + _normalised_phrase(page.get("main_text_excerpt")) + " "
+        text = " " + _normalised_phrase(" ".join(str(page.get(key) or "") for key in ("main_text_excerpt", "identity_text_excerpt"))) + " "
         name_at = text.find(" " + legal_name + " ")
         address_at = text.find(" " + postcode + " " + place + " ")
         if name_at >= 0 and address_at >= 0 and abs(name_at - address_at) <= 300:
-            return True
-    return False
+            excerpt = str(page.get("main_text_excerpt") or page.get("identity_text_excerpt") or "")
+            address_match = re.search(rf"\b{re.escape(postcode)}\s+{re.escape(place)}\b", excerpt, re.I)
+            span = excerpt[max(0, address_match.start() - 450):address_match.end() + 200] if address_match else excerpt[:5000]
+            return {
+                "source_url": page.get("url"),
+                "content_sha256": page.get("content_sha256"),
+                "source_path": "page.main_text_excerpt",
+                "supporting_span": span,
+                "matched_legal_name": profile.get("name"),
+                "matched_registered_place": f"{postcode} {place}",
+            }
+    return None
 
 
 def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
@@ -79,12 +134,11 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     ]
     candidate_parts.append(rendered.get("main_text_excerpt"))
     candidate_text = " ".join(str(part or "") for part in candidate_parts)
-    homepage_candidate_text = " ".join(str(part or "") for part in [*homepage_identity_parts, value.get("main_text_excerpt"), rendered.get("main_text_excerpt")])
     normalized_candidate_text = " ".join(_tokens(candidate_text))
     candidate_tokens = set(_tokens(candidate_text))
     org_digits = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
-    compact_candidate = re.sub(r"\D", "", candidate_text)
-    compact_homepage_candidate = re.sub(r"\D", "", homepage_candidate_text)
+    homepage_org_proof = _homepage_org_number_proof(value, org_digits, website.get("source_url") or "")
+    operator_conflict = _homepage_operator_conflict(profile, value)
     overlap = sorted(set(core) & candidate_tokens)
     ratio = len(overlap) / len(set(core)) if core else 0.0
     reasons = []
@@ -94,7 +148,9 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "find the best information and most relevant links on all topics related to",
     )
     normalized_raw = unicodedata.normalize("NFKD", candidate_text).encode("ascii", "ignore").decode().casefold()
-    homepage_token_sets = [set(_tokens(part)) for part in homepage_identity_parts if part]
+    # A name-like hostname is a crawl lead, not evidence that the fetched page
+    # belongs to that legal entity. Exact-name publication needs page identity.
+    homepage_token_sets = [set(_tokens(part)) for part in homepage_identity_parts if part and part != hostname]
     exact_homepage_name = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
     substantive_homepage = len(str(value.get("main_text_excerpt") or "").strip()) >= 100
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
@@ -104,15 +160,18 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif is_business_sports_club and "bedriftsidrett" not in normalized_candidate_text and "b i l" not in normalized_candidate_text:
         score = 0.3
         reasons.append("business sports-club entity points to the operating company's site without club evidence")
-    elif org_digits and org_digits in compact_homepage_candidate:
+    elif operator_conflict:
+        score = 0.3
+        reasons.append(f"homepage names another legal operator ({operator_conflict}); a related-company reference is insufficient")
+    elif homepage_org_proof:
         score = 1.0
         reasons.append("exact organisation number appears in homepage identity evidence")
-    elif _legal_name_and_registry_place_on_same_page(profile, value, website.get("source_url") or ""):
+    elif (legal_place_proof := _legal_name_and_registry_place_on_same_page(profile, value, website.get("source_url") or "")):
         score = 0.99
         reasons.append("exact legal name and registered postcode/place appear together on a company page")
-    elif len(core) >= 2 and exact_homepage_name:
+    elif len(core) >= 2 and exact_homepage_name and substantive_homepage:
         score = 0.95
-        reasons.append("all normalized legal-name tokens appear together in homepage identity evidence")
+        reasons.append("all normalized legal-name tokens appear together in substantive homepage identity evidence")
     elif len(core) == 1 and exact_homepage_name and substantive_homepage:
         score = 0.95
         reasons.append("single distinctive legal-name token appears in homepage identity evidence with substantive content")
@@ -126,7 +185,7 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         score = 0.3
         reasons.append("registry-linked URL lacks strong exact-entity identity evidence")
     status = "exact" if score >= 0.9 else "review" if score >= 0.8 else "related_or_uncertain"
-    return {
+    result = {
         "status": status,
         "score": score,
         "publishable": status == "exact",
@@ -135,6 +194,11 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "reasons": reasons,
         "method": "deterministic_name_org_evidence_v2",
     }
+    if score == 0.99:
+        result["proof_source"] = legal_place_proof
+    elif score == 1.0:
+        result["proof_source"] = homepage_org_proof
+    return result
 
 
 def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dict[str, Any]:

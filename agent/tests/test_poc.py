@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 from norway_company_agent.evidence import evidence  # noqa: E402
 from norway_company_agent.crawl_events import extract_page_event, merge_profile_events, missing_seed_error_events  # noqa: E402
 from norway_company_agent.discovery import build_company_search_query, choose_search_candidate, parse_brave_web_results, score_search_candidate  # noqa: E402
-from norway_company_agent.official import _reserve_history_slot, accounting_obligation_assessment, normalize_entity, normalize_financial_history, normalize_financials, normalize_roles  # noqa: E402
+from norway_company_agent.official import _reserve_history_slot, accounting_obligation_assessment, fetch_official_modules, normalize_entity, normalize_financial_history, normalize_financials, normalize_roles  # noqa: E402
+from norway_company_agent.http import FetchResult, fetch_json  # noqa: E402
 from norway_company_agent.operations import domain_request_summary, latency_summary, percentile  # noqa: E402
 from norway_company_agent.sampling import deterministic_extension_sample, deterministic_financial_filer_sample, deterministic_website_audit_sample, financial_filer_eligible, normalize_row, stratum  # noqa: E402
 from norway_company_agent.research import answer_profile, parse_screen_query, screen_profiles  # noqa: E402
@@ -29,6 +30,10 @@ from norway_company_agent.external_control import development_score, run_company
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity, assess_website_identity  # noqa: E402
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.claims import materialise_claims  # noqa: E402
+from norway_company_agent.claim_history import compare_claim_envelopes  # noqa: E402
+from norway_company_agent.synthesis import grounded_summary  # noqa: E402
+from norway_company_agent.nav_jobs import exact_active_job, scan_exact_nav_jobs  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
 from scripts.build_prototype import compact as compact_prototype, qualification_copy  # noqa: E402
@@ -40,6 +45,7 @@ from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_labe
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_observation  # noqa: E402
 from scripts.extract_company_site_news import observation as site_news_observation  # noqa: E402
+from scripts.run_competition_batch import discover_exact_site  # noqa: E402
 from scripts.build_verified_observations import build as build_verified_observations  # noqa: E402
 from scripts.run_google_news_rss_connector import exact_title_match  # noqa: E402
 from scripts.run_linkedin_guest_jobs_connector import canonical_company_url, parse_detail_company_urls, parse_job_cards, parse_typeahead  # noqa: E402
@@ -734,13 +740,114 @@ class OperationsTests(unittest.TestCase):
             },
         }
         envelope = terminal_envelope(profile, run_id="day-1", modules=["registry", "website"], started_at="2026-01-01T00:00:00Z", completed_at="2026-01-01T00:01:00Z")
-        self.assertEqual(envelope["modules"]["registry"]["state"], "complete")
-        self.assertEqual(envelope["modules"]["website"]["state"], "blocked_robots")
+        self.assertEqual(envelope["modules"]["registry"]["state"], "available")
+        self.assertEqual(envelope["modules"]["website"]["state"], "blocked")
         self.assertTrue(validate_envelopes([envelope], 1)["passed"])
         self.assertFalse(validate_envelopes([envelope], 2)["passed"])
 
-    def test_unknown_evidence_state_is_submission_error(self):
-        self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "submission_error")
+    def test_unknown_evidence_state_is_failed(self):
+        self.assertEqual(evidence_terminal_state({"status": "not_fetched"}), "failed")
+
+    def test_v2_envelope_keeps_missing_distinct_and_quarantines_uncertain_site(self):
+        profile = {
+            "organisation_number": "923609016", "name": "Example AS",
+            "evidence": {
+                "registry": evidence("registry", "available", "official_registry_bulk", "https://example.test/bulk", content_sha256="a" * 64),
+                "financials": evidence("financials", "available", "official_annual_accounts", "https://example.test/accounts", content_sha256="b" * 64, value={"records": [{"record_id": 1, "period": {"fraDato": "2025-01-01", "tilDato": "2025-12-31"}, "currency": "NOK", "revenue": 0, "debt": None}]}),
+                "website": evidence("website", "available", "registry_linked_company_website", "https://parent.test", content_sha256="c" * 64, value={"final_url": "https://parent.test", "title": "Parent brand", "content_sha256": "c" * 64, "identity_assessment": {"status": "related_or_uncertain", "publishable": False}}),
+            },
+        }
+        envelope = terminal_envelope(profile, run_id="v2", modules=["registry", "financials", "website"], started_at="2026-09-15T00:00:00Z", completed_at="2026-09-15T00:01:00Z")
+        self.assertEqual(envelope["modules"]["website"]["state"], "ambiguous")
+        self.assertEqual(envelope["modules"]["financials"]["state"], "available")
+        self.assertTrue(validate_envelopes([envelope], 1)["passed"])
+        self.assertEqual([claim["value"] for claim in envelope["claims"] if claim["field"] == "revenue"], [0])
+        self.assertFalse(any(claim["field"] in {"debt", "company_website", "company_site_description"} for claim in envelope["claims"]))
+        self.assertTrue(all(claim["evidence"].get("retrieved_at") and claim["evidence"].get("content_sha256") and claim["evidence"].get("supporting_span") for claim in envelope["claims"]))
+
+    def test_search_discovery_promotes_only_independently_verified_company_site(self):
+        candidate = {"url": "https://example.no/", "title": "Example AS", "snippet": "Company 923609016 in Oslo", "rank": 1, "provider": "brave_search_api"}
+        profile = {"organisation_number": "923609016", "name": "Example AS", "municipality": "OSLO", "evidence": {}}
+        operations = {"status": 200, "bytes": 100, "latency_ms": 20}
+        def fake_site(title):
+            return evidence("website", "available", "registry_linked_company_website", "https://example.no/", content_sha256="a" * 64, value={"final_url": "https://example.no/", "title": title, "main_text_excerpt": "Useful details about the company. " * 10, "content_sha256": "a" * 64, "pages": []})
+        with patch("scripts.run_competition_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_competition_batch.fetch_website", return_value=(fake_site("Other business"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
+            record, metrics = discover_exact_site(profile, "test-key")
+        self.assertEqual(record["status"], "ambiguous")
+        self.assertNotIn("website", profile["evidence"])
+        self.assertEqual(metrics["requests"], 3)
+        with patch("scripts.run_competition_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_competition_batch.fetch_website", return_value=(fake_site("Example AS"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
+            record, metrics = discover_exact_site(profile, "test-key")
+        self.assertEqual(record["status"], "available")
+        self.assertTrue(profile["evidence"]["website"]["value"]["identity_assessment"]["publishable"])
+
+    def test_nav_job_requires_active_unexpired_exact_employer_number(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+        detail = {"uuid": "job-1", "status": "ACTIVE", "ad_content": {"title": "Data engineer", "expires": "2026-10-01T00:00:00Z", "published": "2026-09-01T00:00:00Z", "employer": {"orgnr": "923609016", "name": "Example AS"}}}
+        self.assertEqual(exact_active_job(detail, "923609016", now=now)["title"], "Data engineer")
+        self.assertIsNone(exact_active_job(detail, "999999999", now=now))
+        self.assertEqual(exact_active_job(detail, "999999999", subunit_orgs={"923609016"}, now=now)["employer_relationship"], "registered_workplace_subunit")
+        self.assertIsNone(exact_active_job({**detail, "status": "INACTIVE"}, "923609016", now=now))
+        self.assertIsNone(exact_active_job({**detail, "ad_content": {**detail["ad_content"], "expires": "2026-09-14T00:00:00Z"}}, "923609016", now=now))
+
+    def test_nav_scan_links_a_workplace_ad_only_with_official_parent_subunit_proof(self):
+        profile = {"organisation_number": "931966022", "name": "MERCHANT GROUP AS", "evidence": {
+            "registry": evidence("registry", "available", "official_registry_bulk", "https://data.brreg.no/bulk", content_sha256="a" * 64),
+            "locations": evidence("locations", "available", "official_subunits", "https://data.brreg.no/subunits", content_sha256="b" * 64, value={"locations": [{"organisation_number": "932019256", "name": "MERCHANT"}]}),
+        }}
+        page = {"items": [{"url": "/api/v1/feedentry/job-1", "_feed_entry": {"uuid": "job-1", "businessName": "Merchant Group AS", "status": "ACTIVE"}}], "next_url": None}
+        detail = {"uuid": "job-1", "status": "ACTIVE", "ad_content": {"title": "Data engineer", "expires": "2099-01-01T00:00:00Z", "employer": {"orgnr": "932019256", "name": "Merchant"}}}
+        with patch("norway_company_agent.nav_jobs._json_get", side_effect=[(page, "c" * 64, 100), (detail, "d" * 64, 200)]):
+            records, operations = scan_exact_nav_jobs([profile], "test-token", since="Tue, 01 Sep 2026 00:00:00 GMT", max_pages=1, min_interval=0)
+        self.assertTrue(operations["window_complete"])
+        self.assertEqual(operations["requests"], 2)
+        job = records["931966022"]["value"]["records"][0]
+        self.assertEqual(job["employer_relationship"], "registered_workplace_subunit")
+        self.assertEqual(job["subunit_proof"]["content_sha256"], "b" * 64)
+        profile["evidence"]["jobs"] = records["931966022"]
+        self.assertEqual([c["field"] for c in materialise_claims(profile)], ["registered_workplace", "active_job"])
+
+    def test_nav_inactive_event_with_masked_employer_withdraws_only_a_previously_exact_job(self):
+        profile = {"organisation_number": "931966022", "name": "MERCHANT GROUP AS", "evidence": {"registry": evidence("registry", "available", "official_registry_bulk", "https://data.brreg.no/bulk")}}
+        page = {"items": [{"_feed_entry": {"uuid": "previous-exact-job", "status": "INACTIVE", "businessName": "", "sistEndret": "2026-09-15T00:00:00Z"}}], "next_url": None}
+        with patch("norway_company_agent.nav_jobs._json_get", return_value=(page, "f" * 64, 100)):
+            records, report = scan_exact_nav_jobs([profile], "test-token", since="Tue, 01 Sep 2026 00:00:00 GMT", max_pages=1, min_interval=0, tracked_job_orgs={"previous-exact-job": {"931966022"}})
+        self.assertEqual(report["matched_inactive_job_events"], 1)
+        withdrawal = records["931966022"]["value"]["withdrawals"][0]
+        self.assertEqual(withdrawal["uuid"], "previous-exact-job")
+        self.assertEqual(withdrawal["content_sha256"], "f" * 64)
+        previous_claim = {"id": "job-a", "field": "active_job", "value": {"uuid": "previous-exact-job", "title": "Engineer"}, "expires_at": "2099-01-01T00:00:00Z", "evidence": {"content_sha256": "a" * 64}}
+        previous = {"organisation_number": "931966022", "claims": [previous_claim]}
+        current = {"organisation_number": "931966022", "completed_at": "2026-09-15T00:00:00Z", "claims": [], "profile": {"evidence": {"jobs": records["931966022"]}}, "modules": {"jobs": {"state": "available"}}}
+        events, history = compare_claim_envelopes(previous, current)
+        self.assertEqual(events[0]["event"], "removed")
+        self.assertEqual(events[0]["withdrawal_proof"], withdrawal)
+        self.assertEqual(history, [previous_claim])
+
+    def test_official_people_and_subunits_are_claimed_without_inactive_roles(self):
+        profile = {"organisation_number": "923609016", "evidence": {
+            "roles": evidence("roles", "available", "official_roles", "https://data.brreg.no/roles", content_sha256="a" * 64, value={"roles": [
+                {"name": "Ada Nord", "role_code": "DAGL", "role": "Daglig leder", "group_code": "DAGL", "inactive": False, "last_changed": "2026-09-01"},
+                {"name": "Old Chair", "role_code": "LEDE", "role": "Styrets leder", "group_code": "STYR", "inactive": True, "last_changed": "2026-01-01"},
+            ]}),
+            "locations": evidence("locations", "available", "official_subunits", "https://data.brreg.no/locations", content_sha256="b" * 64, value={"locations": [{"organisation_number": "999999999", "name": "Example workplace", "address": {"poststed": "OSLO"}}]}),
+        }}
+        claims = materialise_claims(profile)
+        self.assertEqual([claim["field"] for claim in claims], ["leadership_role", "registered_workplace"])
+        self.assertEqual(claims[0]["last_changed_at"], "2026-09-01")
+        self.assertEqual(claims[1]["value"]["subunit_organisation_number"], "999999999")
+
+    def test_dated_company_activity_needs_exact_site_article_and_past_date(self):
+        page = {"url": "https://example.no/nyheter/example-expands", "title": "Example expands in Oslo", "published_at": "2026-09-13T00:00:00Z", "main_text_excerpt": "Example opens a new office.", "content_sha256": "b" * 64}
+        website = evidence("website", "available", "company_site", "https://example.no/", retrieved_at="2026-09-15T00:00:00Z", content_sha256="a" * 64, value={"final_url": "https://example.no/", "title": "Example AS", "content_sha256": "a" * 64, "identity_assessment": {"status": "exact", "score": 0.99, "publishable": True}, "pages": [page]})
+        profile = {"organisation_number": "923609016", "name": "Example AS", "evidence": {"website": website}}
+        self.assertEqual([c["field"] for c in materialise_claims(profile)], ["company_website", "dated_company_activity"])
+        website["value"]["pages"][0]["published_at"] = "2026-09-16T00:00:00Z"
+        self.assertEqual([c["field"] for c in materialise_claims(profile)], ["company_website"])
+        website["value"]["pages"][0]["published_at"] = "2026-09-13T00:00:00Z"
+        website["value"]["identity_assessment"]["publishable"] = False
+        self.assertFalse(materialise_claims(profile))
 
     def test_batch_resume_only_skips_profiles_with_all_terminal_modules(self):
         complete = {"evidence": {"registry": {"status": "available"}, "website": {"status": "not_found"}}}
@@ -824,7 +931,7 @@ class WebsiteTests(unittest.TestCase):
         profile = {
             "organisation_number": "985628572",
             "name": "NETSOLUTION VIKEN AS",
-            "evidence": {"website": website},
+            "evidence": {"website": website, "registry": {"value": {"forretningsadresse.postnummer": "3036", "forretningsadresse.poststed": "DRAMMEN"}}},
         }
         self.assertIn("Netsolution Viken AS", website["value"]["identity_text_excerpt"])
         self.assertTrue(assess_website_identity(profile)["publishable"])
@@ -923,7 +1030,7 @@ class DiscoveryTests(unittest.TestCase):
             captured["timeout"] = timeout
             return Response()
 
-        with patch("scripts.run_brave_discovery.urllib.request.urlopen", fake_open):
+        with patch("scripts.run_brave_discovery.BRAVE_OPENER.open", fake_open):
             results, operation = brave_search({
                 "name": "Example AS", "organisation_number": "999999999", "municipality": "OSLO",
             }, "secret-test-key", timeout=3.0, count=5)
@@ -1063,6 +1170,46 @@ class OfficialNormalizationTests(unittest.TestCase):
         self.assertEqual(record["revenue"], 12)
         self.assertEqual(record["operating_result"], 0)
         self.assertEqual(record["currency"], "NOK")
+
+    def test_misrouted_live_registry_and_accounts_are_quarantined_before_claims(self):
+        def misrouted(url):
+            if "regnskapsregisteret" in url:
+                body = [{"id": 1, "virksomhet": {"organisasjonsnummer": "111111111"}, "regnskapsperiode": {"fraDato": "2025-01-01", "tilDato": "2025-12-31"}, "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": 12}}}}]
+            else:
+                body = {"organisasjonsnummer": "111111111", "navn": "Other AS"}
+            return FetchResult(url, 200, 1, 100, body, content_sha256="f" * 64, retrieved_at="2026-09-15T00:00:00Z", attempted_requests=1)
+
+        records, _ = fetch_official_modules("923609016", {"registry_live", "financials"}, misrouted)
+        self.assertEqual(records["registry_live"]["status"], "ambiguous")
+        self.assertEqual(records["financials"]["status"], "ambiguous")
+        self.assertIsNone(records["financials"]["value"])
+        profile = {"organisation_number": "923609016", "evidence": records}
+        self.assertEqual(materialise_claims(profile), [])
+
+    def test_official_redirects_use_request_budget_without_becoming_false_retries(self):
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"organisasjonsnummer":"923609016","navn":"EXAMPLE AS"}'
+
+        def redirected(_request, timeout):
+            from norway_company_agent import http
+            http._request_counts.redirects = 2
+            return Response()
+
+        with patch("norway_company_agent.http._reserve_request_start"), patch("norway_company_agent.http.OFFICIAL_OPENER.open", redirected):
+            result = fetch_json("https://data.brreg.no/enhetsregisteret/api/enheter/923609016", attempts=1)
+        self.assertEqual(result.attempted_requests, 3)
+        self.assertEqual(result.redirect_count, 2)
+        records, _ = fetch_official_modules("923609016", {"registry_live"}, lambda _url: result)
+        self.assertEqual(records["registry_live"]["retry_count"], 0)
 
     def test_financial_history_is_sorted_and_links_to_official_pdfs(self):
         record = normalize_financial_history(["2024", "2022", "2024", "invalid"], "923609016")
@@ -1254,19 +1401,65 @@ class WebsiteIdentityTests(unittest.TestCase):
         self.assertEqual(result["quarantined_social_links"], 1)
 
     def test_exact_legal_name_is_publishable(self):
-        row = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS", "evidence": {"website": {"status": "available", "value": {"title": "Norsk Fiskeeksport AS"}}}}
+        row = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS", "evidence": {"website": {"status": "available", "value": {"title": "Norsk Fiskeeksport AS", "main_text_excerpt": "Fish export services and customer information. " * 4}}}}
         self.assertTrue(assess_website_identity(row)["publishable"])
+        row["evidence"]["website"]["value"]["main_text_excerpt"] = ""
+        self.assertFalse(assess_website_identity(row)["publishable"])
+
+    def test_an_org_number_in_the_hostname_cannot_prove_an_unrelated_homepage(self):
+        profile = {"organisation_number": "923609016", "name": "Example AS", "evidence": {"website": {"status": "available", "source_url": "https://923609016.no/", "value": {
+            "final_url": "https://923609016.no/", "title": "Other business", "main_text_excerpt": "Another company's products and services are described here. " * 4,
+        }}}}
+        self.assertFalse(assess_website_identity(profile)["publishable"])
+
+    def test_related_company_in_staff_list_does_not_override_the_homepage_operator(self):
+        profile = {"organisation_number": "925805645", "name": "ROYAL SUBSEA AS", "evidence": {
+            "registry": {"value": {"forretningsadresse.postnummer": "4250", "forretningsadresse.poststed": "KOPERVIK"}},
+            "website": {"status": "available", "source_url": "https://royalis.no/", "value": {
+                "final_url": "https://royalis.no/", "title": "Mainpage | Royal Industriservices",
+                "description": "Royal Industriservices AS is a staffing company for onshore and offshore assignments.",
+                "main_text_excerpt": "Royal Industriservices AS provides staff to its clients. " * 4,
+                "pages": [{"url": "https://royalis.no/about-us/", "main_text_excerpt": "Roy manages Royal Industriservices AS, Royal Subsea AS and Royal Solutions AS. Hovedgaten 18, 4250 Kopervik."}],
+            }},
+        }}
+        result = assess_website_identity(profile)
+        self.assertFalse(result["publishable"])
+        self.assertIn("another legal operator", result["reasons"][0])
+
+    def test_a_titleless_homepage_with_its_org_number_produces_a_source_backed_site_claim(self):
+        page_text = "Foundation gives educational support in Norway. " * 10 + "Org.nr: 920 186 114, registered foundation."
+        website = evidence("website", "available", "registry_linked_company_website", "https://foundation.no/", content_sha256="e" * 64,
+                           value={"final_url": "https://foundation.no/", "title": "", "main_text_excerpt": page_text, "content_sha256": "e" * 64})
+        profile = {"organisation_number": "920186114", "name": "Example Foundation", "evidence": {"website": website}}
+        apply_website_identity_gate(profile, website)
+        claim = next(item for item in materialise_claims(profile) if item["field"] == "company_website")
+        self.assertEqual(claim["value"], "https://foundation.no/")
+        self.assertEqual(claim["evidence"]["source_path"], "homepage.main_text_excerpt")
+        self.assertIn("920 186 114", claim["evidence"]["supporting_span"])
+        self.assertEqual(claim["identity_proof"]["proof_source"]["content_sha256"], "e" * 64)
+
+    def test_a_nine_digit_sequence_without_an_org_label_is_not_identity_proof(self):
+        profile = {"organisation_number": "920186114", "name": "Example Foundation", "evidence": {"website": {
+            "status": "available", "source_url": "https://unrelated.no/", "value": {
+                "final_url": "https://unrelated.no/", "title": "Different foundation",
+                "main_text_excerpt": "Call us at 920186114 for support on an unrelated organisation. " * 3,
+            },
+        }}}
+        self.assertFalse(assess_website_identity(profile)["publishable"])
 
     def test_contact_page_can_prove_exact_entity_with_registered_place(self):
         registry = {"value": {"forretningsadresse.postnummer": "3550", "forretningsadresse.poststed": "GOL"}}
         website = {"status": "available", "source_url": "https://example.no/", "value": {
             "final_url": "https://example.no/", "title": "Property services",
-            "pages": [{"url": "https://example.no/kontakt/", "main_text_excerpt": "Hallingdal og Valdres Eiendomstaksering AS\nElvevegen 4\n3550 Gol"}],
+            "pages": [{"url": "https://example.no/kontakt/", "main_text_excerpt": "Hallingdal og Valdres Eiendomstaksering AS\nElvevegen 4\n3550 Gol", "content_sha256": "d" * 64}],
         }}
         row = {"organisation_number": "980869466", "name": "HALLINGDAL OG VALDRES EIENDOMSTAKSERING AS", "evidence": {"registry": registry, "website": website}}
         result = assess_website_identity(row)
         self.assertTrue(result["publishable"])
         self.assertIn("registered postcode/place", result["reasons"][0])
+        self.assertEqual(result["proof_source"]["source_url"], "https://example.no/kontakt/")
+        self.assertEqual(result["proof_source"]["content_sha256"], "d" * 64)
+        self.assertIn("3550 Gol", result["proof_source"]["supporting_span"])
 
         website["value"]["pages"][0]["main_text_excerpt"] = "Hallingdal og Valdres Eiendomstaksering AS\nElvevegen 4\n5014 Bergen"
         self.assertFalse(assess_website_identity(row)["publishable"])
@@ -1343,6 +1536,41 @@ class VerifiedSiteSeedTests(unittest.TestCase):
             failed = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("unknown organisations", failed.stderr)
+
+
+class ClaimHistorySafetyTests(unittest.TestCase):
+    def test_summary_requires_claim_ids_and_does_not_infer_no_jobs_when_nav_was_not_checked(self):
+        claim = {"id": "registry-name-a", "field": "legal_name", "value": "Merchant Group AS", "evidence": {"source_url": "https://data.brreg.no/enheter/931966022"}}
+        envelope = {"claims": [claim], "modules": {"website": {"state": "ambiguous"}}}
+        summary = grounded_summary(envelope)
+        self.assertEqual(summary["sentences"][0]["supporting_claim_ids"], ["registry-name-a"])
+        self.assertTrue(all(set(sentence["supporting_claim_ids"]) <= {"registry-name-a"} for sentence in summary["sentences"]))
+        self.assertTrue(any("not been verified by a completed NAV" in text for text in summary["unknowns"]))
+        self.assertFalse(any("No active NAV job matched" in text for text in summary["unknowns"]))
+
+    def test_source_outage_does_not_withdraw_a_job_and_new_hash_keeps_older_evidence(self):
+        job = {"id": "job-a", "field": "active_job", "value": {"uuid": "nav-a", "title": "Engineer"}, "expires_at": "2099-01-01T00:00:00Z", "evidence": {"content_sha256": "a" * 64}}
+        previous = {"organisation_number": "931966022", "completed_at": "2026-09-14T00:00:00Z", "claims": [job], "modules": {"jobs": {"state": "available"}}}
+        outage = {"organisation_number": "931966022", "completed_at": "2026-09-15T00:00:00Z", "claims": [], "modules": {"jobs": {"state": "failed"}}}
+        events, history = compare_claim_envelopes(previous, outage)
+        self.assertEqual([(item["field"], item["event"]) for item in events], [("active_job", "deferred")])
+        self.assertEqual(history, [job])
+
+        recovered = {"organisation_number": "931966022", "completed_at": "2026-09-16T00:00:00Z", "claims": [{**job, "evidence": {"content_sha256": "b" * 64}}], "modules": {"jobs": {"state": "available"}}}
+        events, history = compare_claim_envelopes({**outage, "claim_history": history}, recovered)
+        self.assertEqual(events[0]["event"], "restored")
+        self.assertEqual({item["evidence"]["content_sha256"] for item in history}, {"a" * 64, "b" * 64})
+        self.assertEqual(compare_claim_envelopes({**recovered, "claim_history": history}, recovered)[0], [])
+
+    def test_registered_workplace_removal_needs_available_list_and_job_expiration_needs_date(self):
+        workplace = {"id": "site-a", "field": "registered_workplace", "value": {"subunit_organisation_number": "932019256", "name": "Merchant"}, "evidence": {"content_sha256": "a" * 64}}
+        job = {"id": "job-a", "field": "active_job", "value": {"uuid": "nav-a", "title": "Engineer"}, "expires_at": "2026-09-15T00:00:00Z", "evidence": {"content_sha256": "a" * 64}}
+        previous = {"organisation_number": "931966022", "claims": [workplace, job]}
+        current = {"organisation_number": "931966022", "completed_at": "2026-09-16T00:00:00Z", "claims": [], "modules": {"locations": {"state": "available"}, "jobs": {"state": "failed"}}}
+        events, history = compare_claim_envelopes(previous, current)
+        self.assertEqual({item["field"]: item["event"] for item in events}, {"registered_workplace": "removed", "active_job": "expired"})
+        self.assertEqual(len(history), 2)
+        self.assertEqual(compare_claim_envelopes({**current, "claim_history": history}, current)[0], [])
 
 
 if __name__ == "__main__":
