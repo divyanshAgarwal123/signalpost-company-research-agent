@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import Counter
 from datetime import datetime
@@ -28,6 +29,20 @@ def main() -> None:
         all(sentence.get("supporting_claim_ids") and set(sentence["supporting_claim_ids"]) <= {claim.get("id") for claim in row.get("claims") or []}
             for sentence in (row.get("summary") or {}).get("sentences") or [])
         for row in envelopes
+    )
+    v2_envelope_fields_present = all(
+        isinstance(row.get("legal_identity"), dict) and isinstance(row.get("source_snapshots"), list)
+        and isinstance(row.get("refresh"), dict) and isinstance(row.get("errors"), list)
+        and (row["legal_identity"] or {}).get("organisation_number") == row.get("organisation_number")
+        and (row["refresh"] or {}).get("idempotence_key")
+        for row in envelopes
+    )
+    bounded_snapshots_valid = v2_envelope_fields_present and all(
+        snapshot.get("source_url") and snapshot.get("source_content_sha256") and snapshot.get("retrieved_at")
+        and snapshot.get("snapshot_scope") == "bounded_claim_spans"
+        and snapshot.get("bounded_spans_sha256") == hashlib.sha256(json.dumps(snapshot.get("claim_spans") or [], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        and all(span.get("claim_id") in {claim.get("id") for claim in row.get("claims") or []} for span in snapshot.get("claim_spans") or [])
+        for row in envelopes for snapshot in row.get("source_snapshots") or []
     )
     site_claims = [claim for claim in claims if claim.get("field") == "company_website"]
     families = Counter(claim.get("field") for claim in claims)
@@ -61,6 +76,8 @@ def main() -> None:
             "material_claims": len(claims),
             "claim_source_date_hash_path_span_present": claim_metadata,
             "summary_claim_ids_locally_valid": summary_citations_valid if summaries_present else None,
+            "v2_identity_snapshot_refresh_errors_present": bool(v2_envelope_fields_present),
+            "bounded_source_snapshot_descriptors_locally_valid": bool(bounded_snapshots_valid),
             "claim_families": dict(families),
             "registered_website_candidates": website_candidates,
             "publishable_company_website_claims": website_published,
@@ -73,7 +90,7 @@ def main() -> None:
         "unmeasured_or_incomplete": [
             "21/35 coverage and 60% weighted external company recall need Builderr's checked field-family pool and weights",
             "95% exact-company precision needs independent labelled source-to-entity audit",
-            "claim spans and source hashes need frozen raw-snapshot verification, not metadata presence alone",
+            "bounded claim-span descriptors are locally checked; full raw source bodies and their original content hashes remain unavailable for frozen-snapshot verification",
             "source refresh and history need a live unchanged/changed replay under the v2 envelope",
             "the eligible-universe manifest, 1000-profile content and public artifact need audit and submission" if len(envelopes) >= 1000 else "1000 completed public profiles and matching manifest have not been produced",
             "claim-linked summaries exist locally, but Builderr synthesis, gallery UX and JBOX eligibility remain unmeasured" if summaries_present else "this artifact does not yet include the latest claim-linked summary; gallery UX and JBOX eligibility are unmeasured",

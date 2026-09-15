@@ -1,0 +1,52 @@
+{
+  "run_id": "submission1000-20260915-v2",
+  "started_at": "2026-09-15T13:18:30.535302Z",
+  "completed_at": "2026-09-15T13:39:38.197105Z",
+  "expected_count": 1000,
+  "emitted_envelopes": 1000,
+  "resumed_profiles": 25,
+  "profiles_fetched_this_run": 975,
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website"
+  ],
+  "registry": {
+    "registry_snapshot_sha256": "4ff19012c86ecf16bd7caeaea6735b2672eea904c8d52214de76090302cdfd70",
+    "registry_rows_scanned": 1174122,
+    "requested": 1000,
+    "selected": 1000
+  },
+  "operations": {
+    "requests": 5742,
+    "bytes": 53561139,
+    "p50_ms": 788,
+    "p95_ms": 1147,
+    "brave_search_queries": 0,
+    "declared_brave_search_cost_usd": 0.0
+  },
+  "daily_budget": {
+    "applicable": false,
+    "reported_requests_pass": null,
+    "wall_time_pass": null,
+    "declared_external_cost_pass": null
+  },
+  "nav_jobs": null,
+  "claim_refresh_events": null,
+  "validation": {
+    "passed": true,
+    "checks": {
+      "exact_expected_count": true,
+      "unique_organisation_numbers": true,
+      "all_entity_states_terminal": true,
+      "all_module_states_terminal": true,
+      "zero_silent_drops": true
+    },
+    "invalid_states": []
+  }
+}

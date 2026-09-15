@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import gzip
 import csv
 import sys
@@ -764,6 +765,25 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual([claim["value"] for claim in envelope["claims"] if claim["field"] == "revenue"], [0])
         self.assertFalse(any(claim["field"] in {"debt", "company_website", "company_site_description"} for claim in envelope["claims"]))
         self.assertTrue(all(claim["evidence"].get("retrieved_at") and claim["evidence"].get("content_sha256") and claim["evidence"].get("supporting_span") for claim in envelope["claims"]))
+        self.assertEqual(envelope["legal_identity"]["organisation_number"], "923609016")
+        self.assertEqual(envelope["refresh"]["mode"], "initial")
+        self.assertTrue(envelope["refresh"]["idempotence_key"])
+        self.assertEqual(envelope["errors"], [])
+        self.assertTrue(envelope["source_snapshots"])
+        for snapshot in envelope["source_snapshots"]:
+            bounded = json.dumps(snapshot["claim_spans"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            self.assertEqual(snapshot["bounded_spans_sha256"], hashlib.sha256(bounded.encode("utf-8")).hexdigest())
+            self.assertEqual(snapshot["snapshot_scope"], "bounded_claim_spans")
+
+    def test_failed_source_is_explicit_in_terminal_errors(self):
+        profile = {"organisation_number": "923609016", "name": "Example AS", "evidence": {
+            "registry": evidence("registry", "available", "official_registry_bulk", "https://example.test/bulk", content_sha256="a" * 64),
+            "financials": evidence("financials", "source_error", "official_annual_accounts", "https://example.test/accounts", note="HTTP 503"),
+        }}
+        envelope = terminal_envelope(profile, run_id="failed-source", modules=["registry", "financials"], started_at="2026-09-15T00:00:00Z", completed_at="2026-09-15T00:01:00Z")
+        self.assertEqual(envelope["modules"]["financials"]["state"], "failed")
+        self.assertEqual(envelope["errors"][0]["module"], "financials")
+        self.assertEqual(envelope["errors"][0]["error_type"], "source_error")
 
     def test_search_discovery_promotes_only_independently_verified_company_site(self):
         candidate = {"url": "https://example.no/", "title": "Example AS", "snippet": "Company 923609016 in Oslo", "rank": 1, "provider": "brave_search_api"}

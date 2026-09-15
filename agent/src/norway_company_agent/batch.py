@@ -135,6 +135,52 @@ def terminal_envelope(
         }
     entity_state = "failed" if module_states.get("registry", {}).get("state") == "failed" else "available"
     claims = materialise_claims(profile)
+    snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+    for claim in claims:
+        sources = [(claim.get("evidence") or {}, claim.get("id"))]
+        proof = ((claim.get("identity_proof") or {}).get("proof_source") or {})
+        if proof:
+            sources.append((proof, claim.get("id")))
+        for source, claim_id in sources:
+            url = str(source.get("source_url") or "")
+            content_hash = str(source.get("content_sha256") or "")
+            if not url or not content_hash:
+                continue
+            key = (url, content_hash)
+            snapshot = snapshots.setdefault(key, {
+                "source_url": url,
+                "source_class": source.get("source_class") or "company_identity_proof",
+                "source_content_sha256": content_hash,
+                "retrieved_at": source.get("retrieved_at") or completed_at,
+                "snapshot_scope": "bounded_claim_spans",
+                "claim_spans": [],
+            })
+            span = {
+                "claim_id": claim_id,
+                "source_path": source.get("source_path"),
+                "supporting_span": source.get("supporting_span"),
+                "extraction_method": source.get("extraction_method") or claim.get("evidence", {}).get("extraction_method"),
+            }
+            if span not in snapshot["claim_spans"]:
+                snapshot["claim_spans"].append(span)
+    ordered_snapshots = [snapshots[key] for key in sorted(snapshots)]
+    for snapshot in ordered_snapshots:
+        bounded = json.dumps(snapshot["claim_spans"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        snapshot["bounded_spans_sha256"] = hashlib.sha256(bounded.encode("utf-8")).hexdigest()
+    claim_identity = [(item.get("id"), (item.get("evidence") or {}).get("content_sha256")) for item in claims]
+    idempotence_key = hashlib.sha256(json.dumps(sorted(claim_identity), ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+    errors = []
+    for module, module_state in module_states.items():
+        if module_state["state"] != "failed":
+            continue
+        record = (profile.get("evidence") or {}).get(module) or {}
+        errors.append({
+            "module": module,
+            "source_url": record.get("source_url"),
+            "error_type": record.get("status") or "missing_source_record",
+            "message": record.get("note") or "Source access or extraction failed.",
+            "retrieved_at": record.get("retrieved_at") or completed_at,
+        })
     result = {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
@@ -142,7 +188,16 @@ def terminal_envelope(
         "started_at": started_at,
         "completed_at": completed_at,
         "modules": module_states,
+        "legal_identity": {
+            "organisation_number": profile["organisation_number"],
+            "registered_name": profile.get("name"),
+            "legal_form": profile.get("legal_form"),
+            "source_url": ((profile.get("evidence") or {}).get("registry_live") or (profile.get("evidence") or {}).get("registry") or {}).get("source_url"),
+        },
         "claims": claims,
+        "source_snapshots": ordered_snapshots,
+        "refresh": {"mode": "initial", "previous_snapshot": None, "checked_at": completed_at, "idempotence_key": idempotence_key, "material_events": []},
+        "errors": errors,
         "profile": profile,
     }
     result["summary"] = grounded_summary(result)

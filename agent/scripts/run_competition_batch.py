@@ -216,6 +216,13 @@ def main() -> None:
             events, history = compare_claim_envelopes(prior_by_org[envelope["organisation_number"]], envelope)
             envelope["claim_events"] = events
             envelope["claim_history"] = history
+            envelope["refresh"] = {
+                **envelope["refresh"],
+                "mode": "recheck",
+                "previous_snapshot": (prior_by_org[envelope["organisation_number"]].get("refresh") or {}).get("idempotence_key"),
+                "material_events": [event for event in events if event.get("event") != "unchanged"],
+                "previous_evidence_preserved": True,
+            }
             envelope["summary"] = grounded_summary(envelope)
             for event in events:
                 kind = event["event"]
