@@ -1257,6 +1257,20 @@ class WebsiteIdentityTests(unittest.TestCase):
         row = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS", "evidence": {"website": {"status": "available", "value": {"title": "Norsk Fiskeeksport AS"}}}}
         self.assertTrue(assess_website_identity(row)["publishable"])
 
+    def test_contact_page_can_prove_exact_entity_with_registered_place(self):
+        registry = {"value": {"forretningsadresse.postnummer": "3550", "forretningsadresse.poststed": "GOL"}}
+        website = {"status": "available", "source_url": "https://example.no/", "value": {
+            "final_url": "https://example.no/", "title": "Property services",
+            "pages": [{"url": "https://example.no/kontakt/", "main_text_excerpt": "Hallingdal og Valdres Eiendomstaksering AS\nElvevegen 4\n3550 Gol"}],
+        }}
+        row = {"organisation_number": "980869466", "name": "HALLINGDAL OG VALDRES EIENDOMSTAKSERING AS", "evidence": {"registry": registry, "website": website}}
+        result = assess_website_identity(row)
+        self.assertTrue(result["publishable"])
+        self.assertIn("registered postcode/place", result["reasons"][0])
+
+        website["value"]["pages"][0]["main_text_excerpt"] = "Hallingdal og Valdres Eiendomstaksering AS\nElvevegen 4\n5014 Bergen"
+        self.assertFalse(assess_website_identity(row)["publishable"])
+
     def test_parent_brand_without_legal_name_is_quarantined(self):
         row = {"organisation_number": "988412406", "name": "Tevlingveien 23 Invest AS", "evidence": {"website": {"status": "available", "value": {"title": "Ragde Eiendom"}}}}
         self.assertFalse(assess_website_identity(row)["publishable"])

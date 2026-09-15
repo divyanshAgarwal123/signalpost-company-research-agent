@@ -32,6 +32,34 @@ def _structured_names(value: Any) -> list[str]:
     return names
 
 
+def _normalised_phrase(value: Any) -> str:
+    text = str(value or "").translate(str.maketrans({"ø": "o", "Ø": "O", "å": "a", "Å": "A", "æ": "ae", "Æ": "AE"}))
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().casefold()
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
+def _legal_name_and_registry_place_on_same_page(profile: dict[str, Any], value: dict[str, Any], source_url: str) -> bool:
+    registry = (profile.get("evidence", {}).get("registry") or {}).get("value") or {}
+    legal_name = _normalised_phrase(profile.get("name"))
+    postcode = _normalised_phrase(registry.get("forretningsadresse.postnummer"))
+    place = _normalised_phrase(registry.get("forretningsadresse.poststed"))
+    if not legal_name or not postcode or not place:
+        return False
+    source_host = (urllib.parse.urlparse(value.get("final_url") or source_url).hostname or "").removeprefix("www.")
+    pages = [{"url": value.get("final_url") or source_url, "main_text_excerpt": value.get("main_text_excerpt")}]
+    pages.extend(value.get("pages") or [])
+    for page in pages:
+        page_host = (urllib.parse.urlparse(page.get("url") or "").hostname or "").removeprefix("www.")
+        if page_host != source_host:
+            continue
+        text = " " + _normalised_phrase(page.get("main_text_excerpt")) + " "
+        name_at = text.find(" " + legal_name + " ")
+        address_at = text.find(" " + postcode + " " + place + " ")
+        if name_at >= 0 and address_at >= 0 and abs(name_at - address_at) <= 300:
+            return True
+    return False
+
+
 def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     website = profile.get("evidence", {}).get("website", {})
     value = website.get("value") or {}
@@ -79,6 +107,9 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif org_digits and org_digits in compact_homepage_candidate:
         score = 1.0
         reasons.append("exact organisation number appears in homepage identity evidence")
+    elif _legal_name_and_registry_place_on_same_page(profile, value, website.get("source_url") or ""):
+        score = 0.99
+        reasons.append("exact legal name and registered postcode/place appear together on a company page")
     elif len(core) >= 2 and exact_homepage_name:
         score = 0.95
         reasons.append("all normalized legal-name tokens appear together in homepage identity evidence")
