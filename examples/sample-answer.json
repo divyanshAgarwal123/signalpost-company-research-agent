@@ -1,0 +1,66 @@
+{
+  "organisation_number": "917805717",
+  "company_name": "MØLLER BIL ØST AS",
+  "question": "What is its revenue?",
+  "facts": [
+    {
+      "claim": "Reporting period",
+      "value": {
+        "fraDato": "2023-01-01",
+        "tilDato": "2023-12-31"
+      },
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    },
+    {
+      "claim": "Revenue",
+      "value": 3180342239.0,
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    },
+    {
+      "claim": "Operating result",
+      "value": 50047780.0,
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    },
+    {
+      "claim": "Annual result",
+      "value": 26314473.0,
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    },
+    {
+      "claim": "Assets",
+      "value": 733719964.0,
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    },
+    {
+      "claim": "Debt",
+      "value": 621979810.0,
+      "classification": "official_annual_account",
+      "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/917805717",
+      "retrieved_at": "2026-10-06T15:10:38.325213Z",
+      "source_class": "official_annual_accounts",
+      "content_sha256": "e0d2438a70c73a806cd6941fe720f725d2ff94e45b7b2a68fd2eaa62fb13abcb"
+    }
+  ],
+  "unsupported_or_uncertain": [],
+  "answer_policy": "Retrieval and deterministic filtering precede prose; only source-linked facts are returned."
+}

@@ -1,9 +1,7 @@
-starter-kit.zip
-signalpost-company-universe-2025.jsonl.gz
 brreg-enheter.csv.gz
-entry-candidates-1000.jsonl
 agent/.venv/
 agent/out/
+/out/
 __pycache__/
 agent/.pytest_cache/
 agent/site/

@@ -31,7 +31,7 @@ def materialize(base_profiles: list[dict], snapshot: dict, modules: set[str]) ->
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay evaluator-owned old/new source bytes through production normalizers")
+    parser = argparse.ArgumentParser(description="Replay saved old/new source responses through production normalizers")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main() -> None:
     evidence_complete = all(item.get("source_url") and item.get("retrieved_at") and item.get("effective_at") and item.get("old_content_sha256") and item.get("new_content_sha256") for item in changes)
     idempotent = diff_datasets(current, current) == []
     report = {
-        "corpus": manifest.get("corpus", "evaluator-owned snapshot replay"),
+        "corpus": manifest.get("corpus", "saved source snapshot replay"),
         "profiles": len(base),
         "modules": sorted(modules),
         "old_requests": len(old_fetcher.requests),
@@ -65,13 +65,13 @@ def main() -> None:
         "recall": recall,
         "evidence_complete": evidence_complete,
         "idempotent_rerun": idempotent,
-        "qualification_passed": precision >= 0.95 and recall >= 0.95 and evidence_complete and idempotent,
+        "checks_passed": precision >= 0.95 and recall >= 0.95 and evidence_complete and idempotent,
         "events": changes,
     }
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "events"}, ensure_ascii=False, indent=2))
-    raise SystemExit(0 if report["qualification_passed"] else 1)
+    raise SystemExit(0 if report["checks_passed"] else 1)
 
 
 if __name__ == "__main__":

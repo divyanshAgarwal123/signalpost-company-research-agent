@@ -1,17 +1,108 @@
-# Signalpost company research agent
+# Signalpost
 
-This is the exact-code Signalpost company-research entry. [SUBMISSION.md](SUBMISSION.md) names the public artifact, evaluator command, source rights, cost and limitations. [RESEARCH.md](RESEARCH.md) is the verified challenge brief. `agent/` began with the official Builderr starter kit. The local runs are recorded in [BASELINE_RESULTS.md](BASELINE_RESULTS.md), the qualification audit is in [EVALUATION_ASSESSMENT.md](EVALUATION_ASSESSMENT.md), the ranked work toward prizes is in [PRIZE_STRATEGY.md](PRIZE_STRATEGY.md), and the access/cost boundaries are in [SOURCE_POLICY.md](SOURCE_POLICY.md). Builderr has not independently scored this version.
+**Company research with a source for every claim.** I built Signalpost to turn a Norwegian organisation number into a research profile I can inspect, refresh, and audit. It combines official registry and accounts data with carefully verified company website evidence. When a source is missing or the company match is uncertain, it says so instead of inventing a result.
 
-The evaluator entry point is `./run_signalpost.sh INPUT_JSONL BRREG_BULK_CSV_GZ OUTPUT_DIRECTORY 100`. Supply absolute paths to Builderr's input batch, its official registry snapshot and a writable output directory. The script installs pinned dependencies from `agent/uv.lock`, runs the agent once, and writes `profiles.jsonl`, `envelopes.jsonl` and `run-report.json`. An optional fifth argument is the previous envelope file for claim-level refresh. It needs Python 3.12+, `uv`, network access to the permitted sources and the evaluator-provided official bulk snapshot. The default terminal run uses no hosted model, Brave key or NAV token.
+This repository contains a **runnable command-line agent**, not a hosted web app. It processes a batch of organisation numbers and writes company profiles, evidence-backed result envelopes, and a run report. The default path requires no paid API key or hosted language model.
 
-The saved-data refresh check passes with `cd agent && /opt/homebrew/bin/python3.12 first_run.py`. The fixed ten-company development slice is `agent/data/dev10.jsonl` and includes website, no-website, and ambiguous-brand cases. Official source snapshots are kept locally outside version control.
+**Latest live check (6 October 2026):** 100/100 terminal results in 142 seconds with 637 reported requests. One company website returned HTTP 429 and was marked failed; see [Validation](VALIDATION.md) for the run report and limits.
 
-The submitted public artifact is in `submission/`, with its exact eligible-universe manifest in `agent/data/entry1000.jsonl`. The final no-overlap 100-company run of the one evaluator command returned 100/100 terminal envelopes in 422 seconds with 647 reported requests and $0 declared API spend; the two-company control and unchanged refresh also pass. Registry-linked sites yield sparse external coverage, and the hidden external-positive denominator is unknown. These observations are a coverage warning, not an estimated Builderr score or qualification claim.
+## What it does
 
-The batch runner emits Builderr v2 availability states and material claims with source metadata. Licensed Brave Search discovery can be switched on with `--brave-discovery` and a server-side `BRAVE_SEARCH_API_KEY`; it proposes candidate sites that must pass an independent fetched-page identity check before publication. The key is not configured here, so this path has only been tested with controlled inputs and real coverage remains unmeasured. Brave's published Search price is $5 per 1,000 requests; the runner declares $0.005 per query. The default cap is 80 queries ($0.40), or 40 ($0.20) when the bounded 90-day NAV update feed is also enabled, reserving more of the 2,000-request daily budget for its unfiltered pages. That window cannot rule out older still-open jobs; a dated lawful six-month index and incremental refresh are still needed for competitive recall. Actual redirect/request compliance with both connectors needs a fresh clean run.
+1. **Anchor the legal entity** in a downloaded Brønnøysund Register Centre company snapshot. The organisation number remains the primary identifier throughout the run.
+2. **Research the company** using public registry, annual accounts, roles, group, and workplace records. It checks a registered website when one exists.
+3. **Gate external claims** against exact legal-entity evidence. A parent, brand, franchise, or similarly named company is not silently treated as the target company.
+4. **Write an auditable result** with source URLs, retrieval times, reporting periods, content hashes, claim spans, availability states, and a summary linked to claim IDs.
+5. **Refresh without false withdrawals** by comparing a new run with earlier envelopes. Unavailable sources and bounded scans do not become claims that a job or activity disappeared.
 
-The optional `--nav-jobs` connector uses a registered NAV feed token in `NAV_JOB_FEED_TOKEN` for an entered run; `--nav-public-token-experiment` is limited to local checks. An exact employer organisation number or an officially linked workplace subunit is required for publication. `--previous-envelopes` compares claim identities for overlapping company numbers in an earlier batch, reports added, changed, restored, expired, removed or deferred items, and retains earlier claim evidence versions; absence from a bounded job/news scan or a failed site request is deferred rather than published as a withdrawal. These paths still need an independent coverage audit and a live unchanged/changed replay before freezing.
+The optional Brave Search and NAV job-feed connectors are disabled in the default command. They require separate access and have narrower validation than the core registry path; see [source and access notes](SOURCE_POLICY.md).
 
-When a previous exact job UUID is supplied, the NAV feed's explicit `INACTIVE` event removes the advert from current claims even if its employer name is masked; the event and older job evidence remain in the history. A deterministic user summary references claim IDs for every factual sentence and states website, jobs and company activity gaps without treating absence as zero. These are local implementation checks, not scored Builderr UX or refresh results.
+```mermaid
+flowchart LR
+    A[Organisation numbers] --> B[Official registry snapshot]
+    B --> C[Live official records]
+    B --> D[Candidate company website]
+    C --> E[Identity and evidence checks]
+    D --> E
+    E --> F[Profiles and sourced claims]
+    F --> G[Terminal envelopes and run report]
+    G --> H[Later refresh comparison]
+```
 
-Each terminal envelope explicitly carries legal identity, six-state module availability, material claims, bounded claim-span source snapshot descriptors, a deterministic refresh key and source errors. The descriptors keep source URLs, original content hashes and locally hashed proof spans; they do not contain complete raw source bodies, so full original-hash verification still needs a source fetch or separately lawful archive.
+## Run it
+
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), and network access to the public sources. From the repository root:
+
+```bash
+curl --fail --location --retry 3 --continue-at - \
+  'https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv' \
+  --output brreg-enheter.csv.gz
+
+./run_signalpost.sh agent/data/dev10.jsonl brreg-enheter.csv.gz out/dev10 10
+```
+
+The download is an official company snapshot. It is large and is intentionally excluded from Git. The ten input organisations are in [`agent/data/dev10.jsonl`](agent/data/dev10.jsonl). You can provide your own JSONL file with one `{"organisation_number":"923609016"}` object per line, then set the final argument to its line count. The script uses pinned dependencies from `agent/uv.lock` and accepts absolute or repository-relative paths.
+
+The output directory contains:
+
+| File | Purpose |
+| --- | --- |
+| `profiles.jsonl` | Working profiles with source observations. Keep locally; these may include fetched page excerpts. |
+| `envelopes.jsonl` | One terminal, evidence-backed result per input organisation. |
+| `run-report.json` | Count, runtime, requests, declared API cost, and structural validation. |
+
+You can also ask a question about a profile. The answer layer returns only source-linked facts and marks unsupported topics:
+
+```bash
+cd agent
+uv run --frozen python scripts/ask_agent.py \
+  --input ../out/dev10/profiles.jsonl \
+  --org 917805717 \
+  --question 'What is its revenue?'
+cd ..
+```
+
+See a [source-linked example answer](examples/sample-answer.json) from the October 2026 live check.
+
+To check the same batch again and record material changes, pass the earlier envelopes as the fifth argument:
+
+```bash
+./run_signalpost.sh agent/data/dev10.jsonl brreg-enheter.csv.gz out/dev10-refresh 10 out/dev10/envelopes.jsonl
+```
+
+For a 100-company smoke run, use `agent/data/holdout100.jsonl` and `100` as the expected count. A new run fetches current live responses, so availability, claim counts, and runtime can change.
+
+## Check it without network access
+
+The saved-data replay checks two known changes, evidence preservation, and an unchanged rerun:
+
+```bash
+cd agent
+uv run --frozen python first_run.py
+uv run --frozen python -m unittest discover -s tests -q
+```
+
+The latest local results and their limits are in [Validation](VALIDATION.md). The actual envelope fields and six availability states are documented in [Output contract](agent/OUTPUT_CONTRACT.md).
+
+## Design choices and limits
+
+- **Deterministic publication:** the terminal identity and claim path does not call a hosted model. The summary is built from verified claims and cites their IDs.
+- **Honest absence:** `not_available`, `blocked`, `not_applicable`, `ambiguous`, and `failed` are distinct from `available`. A missing company website or unqueried jobs feed is not evidence of no website or jobs.
+- **Source boundaries:** site requests follow robots policy and block private or reserved network destinations and unsafe redirects. Optional search output only proposes URLs; a fetched exact-company page must provide the evidence.
+- **Coverage:** the default path is strongest on official company records. It does not establish broad website, job, news, or social coverage. A successful local run is not a measured external recall or independent precision score.
+- **Operation:** this is a local batch tool. Deployment, scheduling, a public UI, and third-party monitoring are not included in this repository.
+
+## Project layout
+
+```text
+run_signalpost.sh             one-command batch entry point
+agent/src/norway_company_agent/   research, identity, evidence, refresh, summaries
+agent/scripts/run_batch.py    batch orchestration
+agent/data/                   small input samples
+agent/tests/                  saved-source and unit checks
+VALIDATION.md                 measured results and open checks
+SOURCE_POLICY.md              source, licence, key, and cost boundaries
+```
+
+**Origin and versioning.** I developed this project from Builderr's public Signalpost starter kit; that origin is retained here. The historical challenge version remains available at the exact commit [`ef2455b`](https://github.com/divyanshAgarwal123/signalpost-company-research-agent/tree/ef2455bc6017e0962b4681f7e2bbef41fe3dcd7b). This maintained branch removes the old prize and submission planning material. A commit-pinned challenge submission is evaluated against its own frozen revision, so updates to `main` do not rewrite that revision. Current participation requirements belong to [Builderr's challenge page](https://builderr.ai/challenges/signalpost) and [evaluation contract](https://builderr.ai/docs/signalpost-evaluation-harness.md); this README does not claim acceptance or a score.
+
+Built by [Divyansh Agarwal](https://github.com/divyanshAgarwal123).

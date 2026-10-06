@@ -18,9 +18,17 @@ def main() -> None:
     parser.add_argument("--org", required=True)
     parser.add_argument("--question", default="What do we know about this company?")
     args = parser.parse_args()
-    row = next((json.loads(line) for line in Path(args.input).read_text(encoding="utf-8").splitlines() if line.strip() and json.loads(line).get("organisation_number") == args.org), None)
+    row = None
+    with Path(args.input).open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            candidate = json.loads(line)
+            if candidate.get("organisation_number") == args.org:
+                row = candidate
+                break
     if row is None:
-        raise SystemExit(f"Organisation number {args.org} is not in the frozen sample")
+        raise SystemExit(f"Organisation number {args.org} is not in the input profiles")
     print(json.dumps(answer_profile(row, args.question), ensure_ascii=False, indent=2))
 
 

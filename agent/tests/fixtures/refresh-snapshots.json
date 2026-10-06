@@ -1,5 +1,5 @@
 {
-  "corpus": "evaluator-owned deterministic old/new source snapshot fixture",
+  "corpus": "saved old/new source snapshot fixture",
   "modules": ["registry_live", "financials"],
   "profiles": [
     {
@@ -26,7 +26,7 @@
         },
         "https://data.brreg.no/regnskapsregisteret/regnskap/923609016": {
           "status": 200,
-          "body": [{"id": 1, "regnskapstype": "SELSKAP", "valuta": "NOK", "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": 100}, "driftsresultat": 10}, "aarsresultat": 8}, "eiendeler": {"sumEiendeler": 80}, "egenkapitalGjeld": {"egenkapital": {"sumEgenkapital": 30}, "gjeldOversikt": {"sumGjeld": 50}}}]
+          "body": [{"id": 1, "virksomhet": {"organisasjonsnummer": "923609016"}, "regnskapstype": "SELSKAP", "valuta": "NOK", "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": 100}, "driftsresultat": 10}, "aarsresultat": 8}, "eiendeler": {"sumEiendeler": 80}, "egenkapitalGjeld": {"egenkapital": {"sumEgenkapital": 30}, "gjeldOversikt": {"sumGjeld": 50}}}]
         }
       }
     },
@@ -40,7 +40,7 @@
         },
         "https://data.brreg.no/regnskapsregisteret/regnskap/923609016": {
           "status": 200,
-          "body": [{"id": 1, "regnskapstype": "SELSKAP", "valuta": "NOK", "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": 120}, "driftsresultat": 12}, "aarsresultat": 9}, "eiendeler": {"sumEiendeler": 90}, "egenkapitalGjeld": {"egenkapital": {"sumEgenkapital": 35}, "gjeldOversikt": {"sumGjeld": 55}}}]
+          "body": [{"id": 1, "virksomhet": {"organisasjonsnummer": "923609016"}, "regnskapstype": "SELSKAP", "valuta": "NOK", "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}, "resultatregnskapResultat": {"driftsresultat": {"driftsinntekter": {"sumDriftsinntekter": 120}, "driftsresultat": 12}, "aarsresultat": 9}, "eiendeler": {"sumEiendeler": 90}, "egenkapitalGjeld": {"egenkapital": {"sumEgenkapital": 35}, "gjeldOversikt": {"sumGjeld": 55}}}]
         }
       }
     }

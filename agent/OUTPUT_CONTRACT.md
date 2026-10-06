@@ -1,43 +1,18 @@
-# Minimal output contract
+# Batch output contract
 
-Emit one JSON object per input organisation number.
+`run_signalpost.sh` writes one JSON object per input organisation number to `envelopes.jsonl`, in input order. The core fields are:
 
-```json
-{
-  "organisation_number": "123456789",
-  "run": {
-    "run_id": "2026-08-24-a",
-    "started_at": "2026-08-24T06:00:00Z",
-    "completed_at": "2026-08-24T06:00:08Z",
-    "terminal_status": "completed"
-  },
-  "claims": [
-    {
-      "field": "official_website",
-      "value": "https://example.no/",
-      "availability": "available",
-      "confidence": 0.99,
-      "evidence_ids": ["ev-1"]
-    }
-  ],
-  "evidence": [
-    {
-      "id": "ev-1",
-      "source_url": "https://example.no/",
-      "source_class": "company_owned",
-      "retrieved_at": "2026-08-24T06:00:04Z",
-      "content_sha256": "...",
-      "claim_span": "Example AS, organisation number 123 456 789"
-    }
-  ],
-  "changes": [],
-  "errors": [],
-  "operations": {
-    "requests": 4,
-    "runtime_ms": 8120,
-    "third_party_cost_usd": 0
-  }
-}
-```
+| Field | Meaning |
+| --- | --- |
+| `organisation_number`, `legal_identity` | Requested ID and verified registry identity. |
+| `run_id`, `started_at`, `completed_at`, `state` | Run and terminal status. |
+| `modules` | Each requested module's availability state, retry count, and final timestamp. |
+| `claims` | Material facts with IDs, values, and source evidence. |
+| `source_snapshots` | Bounded claim spans tied to source URLs, hashes, and retrieval times. |
+| `refresh` | Deterministic comparison key and material changes when earlier envelopes are provided. |
+| `summary` | Sentences linked to supporting claim IDs and a list of unknowns. |
+| `errors` | Source or processing failures. |
 
-Allowed availability states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous` and `failed`. A checked source that has zero jobs or zero locations is different from a source that was not checked.
+The six module states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous`, and `failed`. Missing or unverified information is not silently converted into a negative fact.
+
+The companion `run-report.json` records input and output counts, total runtime, request and byte counts, API cost declaration, and structural validation. `profiles.jsonl` is the working observation record and may contain fetched source excerpts. See the [root README](../README.md) for the one-command run and [source notes](../SOURCE_POLICY.md) before sharing outputs.

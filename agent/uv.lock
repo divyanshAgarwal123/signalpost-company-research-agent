@@ -1102,7 +1102,7 @@ wheels = [
 ]
 
 [[package]]
-name = "norway-company-agent-poc"
+name = "signalpost-research-agent"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

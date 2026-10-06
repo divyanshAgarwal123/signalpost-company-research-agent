@@ -46,7 +46,7 @@ from scripts.run_sentiment_model import MODEL_REVISION, normalize_generated_labe
 from scripts.score_company_completeness import score_rows, summarize  # noqa: E402
 from scripts.extract_company_site_activity import observation as site_activity_observation  # noqa: E402
 from scripts.extract_company_site_news import observation as site_news_observation  # noqa: E402
-from scripts.run_competition_batch import discover_exact_site  # noqa: E402
+from scripts.run_batch import discover_exact_site  # noqa: E402
 from scripts.build_verified_observations import build as build_verified_observations  # noqa: E402
 from scripts.run_google_news_rss_connector import exact_title_match  # noqa: E402
 from scripts.run_linkedin_guest_jobs_connector import canonical_company_url, parse_detail_company_urls, parse_job_cards, parse_typeahead  # noqa: E402
@@ -791,12 +791,12 @@ class OperationsTests(unittest.TestCase):
         operations = {"status": 200, "bytes": 100, "latency_ms": 20}
         def fake_site(title):
             return evidence("website", "available", "registry_linked_company_website", "https://example.no/", content_sha256="a" * 64, value={"final_url": "https://example.no/", "title": title, "main_text_excerpt": "Useful details about the company. " * 10, "content_sha256": "a" * 64, "pages": []})
-        with patch("scripts.run_competition_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_competition_batch.fetch_website", return_value=(fake_site("Other business"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
+        with patch("scripts.run_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_batch.fetch_website", return_value=(fake_site("Other business"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
             record, metrics = discover_exact_site(profile, "test-key")
         self.assertEqual(record["status"], "ambiguous")
         self.assertNotIn("website", profile["evidence"])
         self.assertEqual(metrics["requests"], 3)
-        with patch("scripts.run_competition_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_competition_batch.fetch_website", return_value=(fake_site("Example AS"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
+        with patch("scripts.run_batch.brave_search", return_value=([candidate], operations)), patch("scripts.run_batch.fetch_website", return_value=(fake_site("Example AS"), {"requests": 2, "bytes": 200, "latencies_ms": [30]})):
             record, metrics = discover_exact_site(profile, "test-key")
         self.assertEqual(record["status"], "available")
         self.assertTrue(profile["evidence"]["website"]["value"]["identity_assessment"]["publishable"])

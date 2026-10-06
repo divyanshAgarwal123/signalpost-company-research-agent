@@ -207,4 +207,21 @@ def materialise_claims(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 item["expires_at"] = job.get("expires")
                 item["source_page_url"] = job.get("source_page_url")
                 claims.append(item)
-    return claims
+    # Two annual-account filings can report the same fact for the same period.
+    # Keep one claim while preserving separate IDs for facts with different qualifiers.
+    unique: list[dict[str, Any]] = []
+    seen_semantics: set[str] = set()
+    seen_ids: set[str] = set()
+    for item in claims:
+        semantic = json.dumps(
+            [item["organisation_number"], item["field"], item["value"], item.get("reporting_period"), item.get("currency")],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        if semantic in seen_semantics:
+            continue
+        if item["id"] in seen_ids:
+            item["id"] = hashlib.sha256(semantic.encode()).hexdigest()[:24]
+        seen_semantics.add(semantic)
+        seen_ids.add(item["id"])
+        unique.append(item)
+    return unique

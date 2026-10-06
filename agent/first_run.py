@@ -25,7 +25,7 @@ def main() -> int:
     output = root / "out" / "refresh-demo.json"
 
     if not runner.is_file() or not fixture.is_file():
-        print("Starter files are missing. Put first_run.py inside the extracted signalpost-starter-kit folder, then run it again.")
+        print("Required project files are missing. Run this command from the Signalpost repository.")
         return 2
 
     if sys.version_info < (3, 12):
@@ -50,11 +50,11 @@ def main() -> int:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        print("The saved-data check did not finish within 30 seconds. Send this exact blocker to submit@builderr.ai.")
+        print("The saved-data check did not finish within 30 seconds.")
         return 1
 
     if result.returncode:
-        print("The saved-data check failed. Send the text below to submit@builderr.ai:")
+        print("The saved-data check failed:")
         print(result.stdout.strip())
         return 1
 
@@ -74,11 +74,10 @@ def main() -> int:
         print(json.dumps(wrong, indent=2, sort_keys=True))
         return 1
 
-    print("Signalpost starter: SUCCESS")
+    print("Signalpost saved-data check: SUCCESS")
     print("It found both saved changes, added no false change, kept the evidence, and produced the same result on a repeat check.")
     print(f"Result: {output}")
-    print("This is practice only. It does not enter or qualify your agent.")
-    print("Next: open README.md and try the 10-company live run.")
+    print("Next: open the repository README.md and try a live batch.")
     return 0
 
 

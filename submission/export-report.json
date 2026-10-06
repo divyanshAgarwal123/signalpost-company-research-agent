@@ -1,8 +1,0 @@
-{
-  "completed_profiles": 1000,
-  "terminal_envelopes": 1000,
-  "material_claims_preserved": 12690,
-  "public_envelopes_sha256": "aa391f63426d448cbf50e81c60227232f105c7f5c725776ce2b139fbd6561ed9",
-  "public_profiles_sha256": "f113aa1b9397a58aa81ff91025e5b9b9d2354226db96c68c0364b5b256cc5fcb",
-  "redaction": "Only unclaimed raw company-page excerpts and structured contact payloads were removed; claim spans remain unchanged."
-}

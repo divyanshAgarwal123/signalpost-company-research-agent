@@ -40,4 +40,4 @@ set -- --organisations "$organisations" --bulk "$bulk" \
 if [ -n "$previous_envelopes" ]; then
   set -- "$@" --previous-envelopes "$previous_envelopes"
 fi
-"$uv_command" run --frozen python scripts/run_competition_batch.py "$@"
+"$uv_command" run --frozen python scripts/run_batch.py "$@"
